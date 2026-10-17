@@ -1,0 +1,208 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include <arduinoFFT.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+
+#define IIC_SDA 2
+#define IIC_SCL 1
+
+MAX30105 particleSensor;
+TFT_eSPI tft = TFT_eSPI();
+
+const uint16_t SAMPLES = 128;
+const byte NATIVE_SAMPLE_RATE = 50;
+const uint8_t DECIMATION = 2;
+const float SAMPLING_FREQUENCY = (float)NATIVE_SAMPLE_RATE / DECIMATION;
+
+const float MIN_BPM = 40.0;
+const float MAX_BPM = 220.0;
+
+float vReal[SAMPLES];
+float vImag[SAMPLES];
+
+ArduinoFFT<float> FFT = ArduinoFFT<float>(
+  vReal,
+  vImag,
+  SAMPLES,
+  SAMPLING_FREQUENCY
+);
+
+const uint16_t MIN_BIN =
+  (MIN_BPM / 60.0) * SAMPLES / SAMPLING_FREQUENCY;
+
+const uint16_t MAX_BIN =
+  (MAX_BPM / 60.0) * SAMPLES / SAMPLING_FREQUENCY;
+
+
+void showStatus(const char* msg) {
+  tft.fillScreen(TFT_BLACK);
+
+  tft.setTextColor(TFT_BLACK, TFT_BLACK);
+  tft.drawCentreString(msg, 120, 150, 4);
+}
+
+
+void showBPM(float bpm) {
+
+  tft.fillScreen(TFT_BLACK);
+
+  tft.setTextColor(TFT_BLACK, TFT_BLACK);
+  tft.drawCentreString("HEART RATE", 120, 90, 2);
+
+  char line[16];
+
+  snprintf(line, sizeof(line), "%.1f", bpm);
+
+  tft.setTextColor(TFT_BLACK, TFT_BLACK);
+  tft.drawCentreString(line, 120, 140, 4);
+
+  tft.setTextColor(TFT_BLACK, TFT_BLACK);
+  tft.drawCentreString("BPM", 120, 190, 2);
+}
+
+
+void setup() {
+
+  Wire.begin(IIC_SDA, IIC_SCL);
+
+  tft.init();
+  tft.setRotation(0);
+
+
+  if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
+
+    showStatus("Sensor not found");
+
+    while (1) {
+    }
+
+  }
+
+
+  byte ledBrightness = 60;
+  byte sampleAverage = 4;
+  byte ledMode = 2;
+  byte pulseWidth = 411;
+  int adcRange = 4096;
+
+
+  particleSensor.setup(
+    ledBrightness,
+    sampleAverage,
+    ledMode,
+    NATIVE_SAMPLE_RATE,
+    pulseWidth,
+    adcRange
+  );
+
+
+  particleSensor.setPulseAmplitudeRed(0x0A);
+  particleSensor.setPulseAmplitudeGreen(0);
+
+
+  showStatus("Place finger");
+}
+
+
+void loop() {
+
+  uint16_t keptSamples = 0;
+
+  uint16_t rawCounter = 0;
+
+  float irSum = 0;
+
+
+  while (keptSamples < SAMPLES) {
+
+    while (particleSensor.available() == false) {
+
+      particleSensor.check();
+
+    }
+
+
+    long irValue = particleSensor.getIR();
+
+    particleSensor.nextSample();
+
+
+    if (rawCounter % DECIMATION == 0) {
+
+      vReal[keptSamples] = (float)irValue;
+
+      vImag[keptSamples] = 0.0;
+
+      irSum += irValue;
+
+      keptSamples++;
+
+    }
+
+
+    rawCounter++;
+
+  }
+
+
+  float irAverage = irSum / SAMPLES;
+
+
+  if (irAverage < 50000) {
+
+    showStatus("No finger");
+
+    return;
+
+  }
+
+
+  FFT.dcRemoval();
+
+  FFT.windowing(
+    FFTWindow::Hamming,
+    FFTDirection::Forward
+  );
+
+  FFT.compute(
+    FFTDirection::Forward
+  );
+
+  FFT.complexToMagnitude();
+
+
+  uint16_t peakBin = MIN_BIN;
+
+  float peakMagnitude = vReal[MIN_BIN];
+
+
+  for (
+    uint16_t i = MIN_BIN + 1;
+    i <= MAX_BIN;
+    i++
+  ) {
+
+    if (vReal[i] > peakMagnitude) {
+
+      peakMagnitude = vReal[i];
+
+      peakBin = i;
+
+    }
+
+  }
+
+
+  float peakFrequencyHz =
+    (peakBin * SAMPLING_FREQUENCY) /
+    (float)SAMPLES;
+
+
+  float bpm =
+    peakFrequencyHz * 60.0;
+
+
+  showBPM(bpm);
+
+}
